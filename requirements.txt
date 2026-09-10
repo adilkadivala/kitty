@@ -1,0 +1,11 @@
+langchain-ollama
+langchain
+langchain[mcp]
+langgraph
+notion-client
+python-dotenv
+fastapi
+slack-bolt
+uvicorn
+faster-whisper
+edge-tts
