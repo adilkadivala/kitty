@@ -1,49 +1,105 @@
+"""Slack Socket Mode. Talk in a channel Kitty has joined — no @ required."""
+
 import os
+import re
+import time
+import traceback
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv()
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+from agent.agent import GREETING_REPLY, get_agent, is_greeting, run_agent
+
+
+def get_question(event) -> str:
+    words = [w for w in (event.get("text") or "").split() if not w.startswith("<@")]
+    return " ".join(words).strip()
+
+
+def thread_history(client, event):
+    channel = event.get("channel")
+    thread_ts = event.get("thread_ts") or event.get("ts")
+    current_ts = event.get("ts")
+    if not channel or not thread_ts:
+        return []
+    try:
+        result = client.conversations_replies(channel=channel, ts=thread_ts, limit=20)
+    except Exception as e:
+        print(f"[Slack] Could not load thread: {e}")
+        return []
+
+    history = []
+    for message in result.get("messages") or []:
+        if message.get("ts") == current_ts:
+            continue
+        text = (message.get("text") or "").strip()
+        if not text or text == "Thinking...":
+            continue
+        words = [w for w in text.split() if not w.startswith("<@")]
+        text = " ".join(words).strip()
+        if not text:
+            continue
+        role = "assistant" if message.get("bot_id") else "user"
+        history.append({"role": role, "content": text})
+    return history[-16:]
+
+
+def markdown_to_mrkdwn(text: str) -> str:
+    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text or "")
+    text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
+    return text[:3900]
+
 
 def slack():
-    """Slack bot using the manual agent loop."""
+    bot_token = os.getenv("SLACK_BOT_TOKEN")
+    app_token = os.getenv("SLACK_APP_TOKEN")
+    if not bot_token or not app_token:
+        raise SystemExit("Set SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env")
 
-    app = App(token=os.getenv("SLACK_BOT_TOKEN"))
+    app = App(token=bot_token)
+    print(f"[Slack] signed in as {app.client.auth_test().get('user_id')}")
+
+    seen = set()
 
     def handle_event(event, say, client):
-        q, is_voice = get_question(event, client)
-        if not q:
+        event_ts = event.get("ts")
+        if event_ts in seen:
             return
+        if event_ts:
+            seen.add(event_ts)
+            if len(seen) > 200:
+                seen.clear()
 
+        q = get_question(event)
         ts = event.get("thread_ts") or event.get("ts")
-        if is_greeting(q):
+        if not q or is_greeting(q):
             say(text=GREETING_REPLY, thread_ts=ts)
             return
 
         thinking = say(text="Thinking...", thread_ts=ts)
         thinking_ts = thinking["ts"]
-
-        # State for streaming
-        state = {"last_update": 0, "text": ""}
+        state = {"last_update": 0}
 
         def stream_callback(current_text):
-            """Updates Slack message periodically to avoid rate limits."""
-            import time
             now = time.time()
-            state["text"] = current_text
+            if now - state["last_update"] <= 0.8:
+                return
+            try:
+                client.chat_update(
+                    channel=event["channel"],
+                    ts=thinking_ts,
+                    text=markdown_to_mrkdwn(current_text),
+                )
+                state["last_update"] = now
+            except Exception as e:
+                print(f"[Slack] Stream update error: {e}")
 
-            # Only update Slack every 0.8 seconds to avoid rate limits
-            if now - state["last_update"] > 0.8:
-                try:
-                    client.chat_update(
-                        channel=event["channel"],
-                        ts=thinking_ts,
-                        text=markdown_to_mrkdwn(current_text),
-                    )
-                    state["last_update"] = now
-                except Exception as e:
-                    print(f"Stream update error: {e}")
-
-        # WIRE: Run agent with the streaming callback and thread history
         try:
             final_response = run_agent(
                 q,
@@ -51,45 +107,38 @@ def slack():
                 history=thread_history(client, event),
             ) or "I couldn't produce a reply. Please try again."
         except Exception as e:
-            print(f"[Error] Agent failed: {e}")
+            traceback.print_exc()
             final_response = f"I hit an error while answering that: {e}"
 
-        # Final update with Slack formatting and native tables
-        _post_formatted(
-            client,
-            channel=event["channel"],
-            ts=thinking_ts,
-            text=final_response,
-            update=True,
-        )
-
-        # Handle voice response if requested
-        if is_voice:
-            send_answer(client, event["channel"], ts, thinking_ts, final_response, True)
+        try:
+            client.chat_update(
+                channel=event["channel"],
+                ts=thinking_ts,
+                text=markdown_to_mrkdwn(final_response),
+            )
+        except Exception as e:
+            print(f"[Slack] Final update failed: {e}")
+            say(text=markdown_to_mrkdwn(final_response), thread_ts=ts)
 
     @app.event("app_mention")
     def on_mention(event, say, client):
         handle_event(event, say, client)
 
     @app.event("message")
-    def on_message(event, say, client, context):
-        if event.get("bot_id"):
+    def on_message(event, say, client):
+        if event.get("bot_id") or event.get("subtype"):
             return
-
-        # 1. Always respond in Direct Messages (DMs)
-        if event.get("channel_type") == "im":
+        if event.get("channel_type") in ("im", "mpim", "channel", "group"):
             handle_event(event, say, client)
-            return
 
-        # 2. Respond to all messages in a thread
-        # (If there is a thread_ts, it's a reply to a thread the bot is likely already in)
-        if event.get("thread_ts"):
-            handle_event(event, say, client)
-            return
+    print("Kitty is online. Talk in Slack — create, read, or edit Notion pages.")
+    try:
+        get_agent()
+        print("[Slack] agent ready")
+    except Exception as e:
+        print(f"[Slack] warmup failed: {e}")
+    SocketModeHandler(app, app_token).start()
 
-        # 3. In public channels, only respond to mentions (handled by @app.event("app_mention"))
-        # and ignore everything else to avoid spamming the channel.
 
-    print("🚀 Buddy LangChain Slack bot is online!")
-    warmup_tools()
-    SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN")).start()
+if __name__ == "__main__":
+    slack()

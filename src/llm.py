@@ -29,7 +29,12 @@ model = init_chat_model(
 
 def ask_assistant(prompt:str) -> str:
     messages = [
-        SystemMessage(content="You are a helpful assistant that can answer questions and help with tasks."), 
+        SystemMessage(
+            content=(
+                "You are Kitty, a Slack agent for Notion. "
+                "You create, read, edit, search, and archive pages."
+            )
+        ), 
         HumanMessage(content=prompt)
     ]
     response = ""

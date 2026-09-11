@@ -1,23 +1,19 @@
 import os
-import re
 import sys
+from pathlib import Path
 
-from llm import ask_assistant   
 from dotenv import load_dotenv
 
-# Load env vars first
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+load_dotenv(ROOT.parent / ".env")
 load_dotenv()
 
-def run_meeting(page_id: str):
-    actions = notion_extract_actions(page_id)
-    # 5a – write results back to Notion
-    #    (you’ll implement this in the next step)
-    print("🗒️ Extracted action items:")
-    for a in actions:
-        print(f"- {a['title']} (owner: {a['owner']}, due: {a.get('due')})")
 
 def run_cli():
-    print("Welcome to the Kitty CLI. Type 'quit' to exit.")
+    from agent.agent import run_agent
+
+    print("Kitty CLI. Type 'quit' to exit.")
     while True:
         try:
             q = input("Kitty > ").strip()
@@ -25,7 +21,13 @@ def run_cli():
             break
         if q.lower() in ("", "q", "quit", "exit"):
             break
-        response = ask_assistant(q)
-        print(f"\n")  
+        print(run_agent(q), "\n")
+
+
 if __name__ == "__main__":
-    run_cli()
+    if os.getenv("SLACK_APP_TOKEN") and os.getenv("SLACK_BOT_TOKEN"):
+        from intigration.slack import slack
+
+        slack()
+    else:
+        run_cli()

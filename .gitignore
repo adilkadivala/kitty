@@ -8,6 +8,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .ruff_cache/
+*__init__.py
 
 /src/__pycache__/
 
