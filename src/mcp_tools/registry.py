@@ -3,8 +3,12 @@
 import json
 import os
 
+from slack_sdk import WebClient
+
+from langchain.messages import HumanMessage, SystemMessage
 from langchain.tools import tool
 
+from llm import model
 from intigration.notion import (
     append_content,
     create_page,
@@ -81,6 +85,64 @@ def notion_delete_page(query: str) -> str:
         return f"Tool error: {e}"
 
 
+ACTION_ITEMS_PROMPT = (
+    "Extract actionable items from meeting notes and return a markdown bullet list, "
+    "one item per line, prefixed with '- '. "
+    "Return only the list. No intro, outro, or numbering."
+)
+
+
+def _message_text(response) -> str:
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("text"):
+                parts.append(str(part["text"]))
+            elif getattr(part, "text", None):
+                parts.append(str(part.text))
+        return "".join(parts).strip()
+    return str(content or "").strip()
+
+
+@tool
+def notion_generate_action_items(notes: str) -> str:
+    """Extract actionable items from meeting notes as a markdown bullet list ('- ' per line)."""
+    try:
+        messages = [
+            SystemMessage(content=ACTION_ITEMS_PROMPT),
+            HumanMessage(content=notes),
+        ]
+        try:
+            llm = model.bind(options={"temperature": 0.2})
+        except Exception:
+            llm = model
+        return _message_text(llm.invoke(messages))
+    except Exception as e:
+        return f"Tool error: {e}"
+
+
+@tool
+def slack_notify_message(channel: str, text: str) -> str:
+    """Send a Slack message to the given channel (ID) using the bot token from environment.
+
+    Returns a JSON string with the Slack API response fields (ok, channel, ts).
+    """
+    token = os.getenv("SLACK_BOT_TOKEN")
+    if not token:
+        return "SLACK_BOT_TOKEN is not set."
+    try:
+        client = WebClient(token=token)
+        result = client.chat_postMessage(channel=channel, text=text)
+        return json.dumps({"ok": result.get("ok"), "channel": result.get("channel"), "ts": result.get("ts")})
+    except Exception as e:
+        return f"Tool error: {e}"
+
+
 @tool
 def web_search(query: str) -> str:
     """Search the web for current information."""
@@ -100,6 +162,8 @@ NOTION_TOOLS = [
     notion_replace_content,
     notion_rename_page,
     notion_delete_page,
+    notion_generate_action_items,
+    slack_notify_message,
 ]
 
 

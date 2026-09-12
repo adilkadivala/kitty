@@ -4,10 +4,11 @@ import re
 import traceback
 
 from langchain.agents import create_agent
-from langchain.messages import AIMessage, HumanMessage
+from langchain.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
 
 from llm import model
-from mcp_tools.registry import get_tools
+from mcp_tools.registry import get_tools, slack_notify_message
 
 _GREETING = re.compile(
     r"^(hey|hi|hello|yo|sup|howdy|hiya|thanks|thank you|ok|okay|"
@@ -35,10 +36,13 @@ When the user wants something in Notion, call a tool immediately:
 - Rewrite a page body: notion_replace_content(title or id, content)
 - Rename: notion_rename_page(current title, new title)
 - Archive: notion_delete_page(title or id) — ask once, then do it if they confirm
+- Notify a Slack channel: slack_notify_message(channel, text)
 
-Put body text in the content argument as light markdown (#, ##, - ).
-Never ask the user for a Notion page id. Search by title instead.
-Confirm before archive or full replace.
+When the user supplies meeting notes, call notion_generate_action_items once, then notion_create_page (or append) once with that list. Then stop and reply.
+
+Use at most 3 tool calls. After a successful write, reply immediately with the url.
+Do not search in a loop to verify a write. Notion search is delayed; trust the tool JSON.
+If a search returns nothing, create a new page instead of searching again.
 
 You are posting in Slack. No Markdown (**bold**, ##, tables).
 Use Slack mrkdwn: *bold*, _italic_, <https://url|label>, bullets with •
@@ -88,9 +92,26 @@ def _final_text(result) -> str:
     if not messages:
         return ""
     for message in reversed(messages):
+        if getattr(message, "tool_calls", None):
+            continue
+        if isinstance(message, ToolMessage):
+            continue
         text = _message_text(message).strip()
         if text:
             return text
+    return ""
+
+
+def _fallback_from_tools(result) -> str:
+    """If the model never wrote a final reply, surface the last tool output."""
+    messages = result.get("messages") if isinstance(result, dict) else None
+    if not messages:
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, ToolMessage):
+            text = _message_text(message).strip()
+            if text:
+                return text
     return ""
 
 
@@ -112,28 +133,49 @@ def run_agent(question: str, callback=None, history=None):
             callback(GREETING_REPLY)
         return GREETING_REPLY
 
+    # Simple command parsing for direct Slack notifications:
+    notify_match = re.match(r"^notify\\s+(\\S+)\\s+(.+)", question.strip(), re.IGNORECASE)
+    if notify_match:
+        channel = notify_match.group(1)
+        text_msg = notify_match.group(2)
+        try:
+            result = slack_notify_message(channel, text_msg)
+            return f"Notification sent to {channel}: {result}"
+        except Exception as e:
+            return f"Failed to send notification: {e}"
+
     messages = _history_messages(history)
     messages.append(HumanMessage(content=question))
     agent = get_agent()
-    config = {"recursion_limit": 15}
+    config = {"recursion_limit": 8}
 
-    if callback:
-        try:
-            streamed = ""
-            for chunk in agent.stream({"messages": messages}, stream_mode="messages", config=config):
-                message = chunk[0] if isinstance(chunk, tuple) else chunk
-                if not isinstance(message, AIMessage) or getattr(message, "tool_calls", None):
-                    continue
-                text = _message_text(message)
-                if not text:
-                    continue
-                streamed += text
+    last_state = {}
+    streamed = ""
+    try:
+        for chunk in agent.stream({"messages": messages}, stream_mode="values", config=config):
+            last_state = chunk if isinstance(chunk, dict) else last_state
+            text = _final_text(last_state)
+            if text and callback and text != streamed:
+                streamed = text
                 callback(streamed)
-            if streamed.strip():
-                return streamed.strip()
-        except Exception as e:
-            print(f"[Agent] stream failed ({e}); falling back to invoke")
-            traceback.print_exc()
+    except GraphRecursionError:
+        print("[Agent] hit tool-loop limit; using last result")
+        text = _final_text(last_state) or _fallback_from_tools(last_state)
+        if text:
+            return text
+        return (
+            "I started the Notion work but looped on tools. "
+            "Ask me to extract action items only, or to create the page in a second message."
+        )
+    except Exception as e:
+        print(f"[Agent] stream failed: {e}")
+        traceback.print_exc()
+        if last_state:
+            return _final_text(last_state) or _fallback_from_tools(last_state) or str(e)
+        raise
 
-    result = agent.invoke({"messages": messages}, config=config)
-    return _final_text(result) or "I couldn't produce a reply. Please try again."
+    return (
+        _final_text(last_state)
+        or _fallback_from_tools(last_state)
+        or "I couldn't produce a reply. Please try again."
+    )
