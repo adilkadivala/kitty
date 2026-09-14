@@ -1,4 +1,6 @@
-"""Kitty: Slack → Notion agent."""
+"""Kitty: Slack agent for Notion + Gmail + Calendar (with voice in Slack)."""
+
+from __future__ import annotations
 
 import re
 import traceback
@@ -18,36 +20,49 @@ _GREETING = re.compile(
     re.IGNORECASE,
 )
 GREETING_REPLY = (
-    "Hey! I'm Kitty. From Slack I can create, read, edit, search, and archive Notion pages. "
-    "What do you need?"
+    "Hey! I'm Kitty. I can help with Notion, Gmail, and Calendar from Slack "
+    "(including voice notes). What do you need?"
 )
 
 PROMPT = """
-You are Kitty, a Slack agent for Notion. You are not a meeting-only bot.
-Always reply in English.
+You are Kitty, a Slack workplace agent for Notion, Gmail, and Google Calendar.
+Always reply in English only.
 
-Use tools. Do not invent page ids or urls.
+Use tools for real data. Do not invent page ids, urls, emails, or events.
 
-When the user wants something in Notion, call a tool immediately:
-- Create a page: notion_create_page(title, content)
-- Find pages: notion_search_pages(query)
-- Read a page: notion_get_page(title or id)
-- Add to a page: notion_append_content(title or id, content)
-- Rewrite a page body: notion_replace_content(title or id, content)
+Notion:
+- Create: notion_create_page(title, content)
+- Search: notion_search_pages(query)
+- Read: notion_get_page(title or id)
+- Append: notion_append_content(title or id, content)
+- Replace body: notion_replace_content(title or id, content)
 - Rename: notion_rename_page(current title, new title)
 - Archive: notion_delete_page(title or id) — ask once, then do it if they confirm
-- Notify a Slack channel: slack_notify_message(channel, text)
+- Meeting notes → action items: notion_generate_action_items, then create/append a page
+- Notify Slack: slack_notify_message(channel, text)
 
-When the user supplies meeting notes, call notion_generate_action_items once, then notion_create_page (or append) once with that list. Then stop and reply.
+Gmail:
+- Search inbox: search_emails(query)
+- Read one email: get_email_details(email_id)
+- Save draft only: create_draft(to, subject, body) — never sends
+- If a Google tool asks the user to sign in, wait — Slack already showed a login card.
+  After login the tool continues. Never invent emails. Never repeat the user's question as the answer.
 
-Use at most 3 tool calls. After a successful write, reply immediately with the url.
-Do not search in a loop to verify a write. Notion search is delayed; trust the tool JSON.
-If a search returns nothing, create a new page instead of searching again.
+Calendar:
+- List events: list_calendar_events(days_ahead)
+- Create event: create_calendar_event(...) — ask for confirmation first
+
+Web (optional): web_search(query) if Tavily is configured.
+
+Rules:
+- Prefer search_emails before get_email_details.
+- After a successful Notion write, reply with the url from the tool result.
+- Do not search in a loop to verify a Notion write (search is delayed).
+- Use at most a few tool calls, then answer.
 
 You are posting in Slack. No Markdown (**bold**, ##, tables).
 Use Slack mrkdwn: *bold*, _italic_, <https://url|label>, bullets with •
-
-Keep replies short. After a write, include the Notion url from the tool result.
+Keep replies short and scannable.
 """
 
 _agent = None
@@ -133,13 +148,19 @@ def run_agent(question: str, callback=None, history=None):
             callback(GREETING_REPLY)
         return GREETING_REPLY
 
-    # Simple command parsing for direct Slack notifications:
-    notify_match = re.match(r"^notify\\s+(\\S+)\\s+(.+)", question.strip(), re.IGNORECASE)
+    # Shortcut: "notify #channel hello"
+    notify_match = re.match(
+        r"^notify\s+(\S+)\s+(.+)",
+        question.strip(),
+        re.IGNORECASE,
+    )
     if notify_match:
         channel = notify_match.group(1)
         text_msg = notify_match.group(2)
         try:
-            result = slack_notify_message(channel, text_msg)
+            result = slack_notify_message.invoke(
+                {"channel": channel, "text": text_msg}
+            )
             return f"Notification sent to {channel}: {result}"
         except Exception as e:
             return f"Failed to send notification: {e}"
@@ -147,12 +168,16 @@ def run_agent(question: str, callback=None, history=None):
     messages = _history_messages(history)
     messages.append(HumanMessage(content=question))
     agent = get_agent()
-    config = {"recursion_limit": 8}
+    config = {"recursion_limit": 12}
 
     last_state = {}
     streamed = ""
     try:
-        for chunk in agent.stream({"messages": messages}, stream_mode="values", config=config):
+        for chunk in agent.stream(
+            {"messages": messages},
+            stream_mode="values",
+            config=config,
+        ):
             last_state = chunk if isinstance(chunk, dict) else last_state
             text = _final_text(last_state)
             if text and callback and text != streamed:
@@ -164,14 +189,18 @@ def run_agent(question: str, callback=None, history=None):
         if text:
             return text
         return (
-            "I started the Notion work but looped on tools. "
-            "Ask me to extract action items only, or to create the page in a second message."
+            "I started the work but looped on tools. "
+            "Try a simpler ask (one page, one email, or one calendar check)."
         )
     except Exception as e:
         print(f"[Agent] stream failed: {e}")
         traceback.print_exc()
         if last_state:
-            return _final_text(last_state) or _fallback_from_tools(last_state) or str(e)
+            return (
+                _final_text(last_state)
+                or _fallback_from_tools(last_state)
+                or str(e)
+            )
         raise
 
     return (

@@ -1,4 +1,11 @@
-"""Slack Socket Mode. Talk in a channel Kitty has joined — no @ required."""
+"""
+Slack Socket Mode for Kitty.
+
+- Text messages and @mentions
+- Voice notes → Whisper → agent → optional spoken reply (Edge TTS)
+"""
+
+from __future__ import annotations
 
 import os
 import re
@@ -15,14 +22,73 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from agent.agent import GREETING_REPLY, get_agent, is_greeting, run_agent
+from audio import slack_audio_to_text
+from intigration import gmail as google_mail
+from tts import text_to_speech
 
 
-def get_question(event) -> str:
+def google_login_blocks(auth_url: str) -> list:
+    """Slack Block Kit card with a Sign in with Google button."""
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    ":lock: *Connect Google*\n"
+                    "Kitty needs Gmail and Calendar access to finish this. "
+                    "Tap the button, approve access, then I'll continue here."
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Sign in with Google",
+                        "emoji": True,
+                    },
+                    "style": "primary",
+                    "url": auth_url,
+                    "action_id": "google_oauth_open",
+                }
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        "Open this on the computer running Kitty so Google "
+                        "can send you back here."
+                    ),
+                }
+            ],
+        },
+    ]
+
+
+def get_question(event, client):
+    """
+    Read user input from Slack.
+    Returns (text, is_voice).
+    """
+    for f in event.get("files") or []:
+        if (f.get("mimetype") or "").startswith("audio/"):
+            info = client.files_info(file=f["id"])
+            url = info["file"]["url_private_download"]
+            return slack_audio_to_text(url), True
+
     words = [w for w in (event.get("text") or "").split() if not w.startswith("<@")]
-    return " ".join(words).strip()
+    return " ".join(words).strip(), False
 
 
 def thread_history(client, event):
+    """Load recent messages in this Slack thread for follow-up context."""
     channel = event.get("channel")
     thread_ts = event.get("thread_ts") or event.get("ts")
     current_ts = event.get("ts")
@@ -56,6 +122,28 @@ def markdown_to_mrkdwn(text: str) -> str:
     return text[:3900]
 
 
+def send_voice_reply(client, channel_id, thread_ts, thinking_ts, text: str):
+    """Upload a spoken reply, then remove the Thinking message."""
+    spoken = markdown_to_mrkdwn(text) or "I don't have anything to say."
+    mp3_path = text_to_speech(spoken)
+    if not mp3_path:
+        return
+    try:
+        client.files_upload_v2(
+            channel=channel_id,
+            file=mp3_path,
+            initial_comment=spoken[:3900],
+            thread_ts=thread_ts,
+        )
+        try:
+            client.chat_delete(channel=channel_id, ts=thinking_ts)
+        except Exception:
+            pass
+    finally:
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
+
+
 def slack():
     bot_token = os.getenv("SLACK_BOT_TOKEN")
     app_token = os.getenv("SLACK_APP_TOKEN")
@@ -76,17 +164,20 @@ def slack():
             if len(seen) > 200:
                 seen.clear()
 
-        q = get_question(event)
-        ts = event.get("thread_ts") or event.get("ts")
-        if not q or is_greeting(q):
-            say(text=GREETING_REPLY, thread_ts=ts)
+        question, is_voice = get_question(event, client)
+        thread_ts = event.get("thread_ts") or event.get("ts")
+
+        if not question or is_greeting(question):
+            say(text=GREETING_REPLY, thread_ts=thread_ts)
             return
 
-        thinking = say(text="Thinking...", thread_ts=ts)
+        thinking = say(text="Thinking...", thread_ts=thread_ts)
         thinking_ts = thinking["ts"]
-        state = {"last_update": 0}
+        state = {"last_update": 0.0, "login_card": False}
 
         def stream_callback(current_text):
+            if state["login_card"]:
+                return
             now = time.time()
             if now - state["last_update"] <= 0.8:
                 return
@@ -100,25 +191,63 @@ def slack():
             except Exception as e:
                 print(f"[Slack] Stream update error: {e}")
 
+        def show_google_login(auth_url: str):
+            state["login_card"] = True
+            try:
+                client.chat_update(
+                    channel=event["channel"],
+                    ts=thinking_ts,
+                    text="Connect Google to continue — tap Sign in with Google.",
+                    blocks=google_login_blocks(auth_url),
+                )
+            except Exception as e:
+                print(f"[Slack] Login card failed: {e}")
+                say(
+                    text="Connect Google to continue — tap Sign in with Google.",
+                    blocks=google_login_blocks(auth_url),
+                    thread_ts=thread_ts,
+                )
+
+        prompt_token = google_mail.set_auth_prompt(show_google_login)
         try:
             final_response = run_agent(
-                q,
+                question,
                 callback=stream_callback,
                 history=thread_history(client, event),
             ) or "I couldn't produce a reply. Please try again."
         except Exception as e:
             traceback.print_exc()
             final_response = f"I hit an error while answering that: {e}"
+        finally:
+            google_mail.reset_auth_prompt(prompt_token)
 
+        # Text reply (clears the login card once Google is connected)
+        reply = markdown_to_mrkdwn(final_response)
         try:
             client.chat_update(
                 channel=event["channel"],
                 ts=thinking_ts,
-                text=markdown_to_mrkdwn(final_response),
+                text=reply,
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": reply},
+                    }
+                ],
             )
         except Exception as e:
             print(f"[Slack] Final update failed: {e}")
-            say(text=markdown_to_mrkdwn(final_response), thread_ts=ts)
+            say(text=reply, thread_ts=thread_ts)
+
+        # Voice-in → also speak the answer back
+        if is_voice:
+            send_voice_reply(
+                client,
+                event["channel"],
+                thread_ts,
+                thinking_ts,
+                final_response,
+            )
 
     @app.event("app_mention")
     def on_mention(event, say, client):
@@ -131,7 +260,7 @@ def slack():
         if event.get("channel_type") in ("im", "mpim", "channel", "group"):
             handle_event(event, say, client)
 
-    print("Kitty is online. Talk in Slack — create, read, or edit Notion pages.")
+    print("Kitty is online. Notion + Gmail + Calendar (+ voice).")
     try:
         get_agent()
         print("[Slack] agent ready")

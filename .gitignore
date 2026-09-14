@@ -1,5 +1,6 @@
-*.env
-*.venv
+.env
+.env.*
+.venv/
 __pycache__/
 .DS_Store
 .idea/
@@ -7,9 +8,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-.ruff_cache/
-*__init__.py
 
-/src/__pycache__/
+# Google OAuth token — never commit
+token.json
 
 

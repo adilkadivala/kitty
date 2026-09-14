@@ -1,50 +1,57 @@
-# Kitty — Slack × Notion Agent
+<p align="center">
+  <img src="kitty-thumbnail.png" alt="Kitty — Your Slack workplace agent" width="100%">
+</p>
 
-Workplace agent you talk to in Slack (or the CLI). It creates Notion pages, writes content, reads them back, and archives them when you ask. Chat is the UI. Destructive writes wait for a confirm.
+<p align="center">
+  <img src="kitty.jpg" alt="Kitty mascot" width="120">
+</p>
 
-```text
-Slack / CLI  →  Kitty  →  Notion
-                    create page
-                    write / append content
-                    get / search
-                    archive (delete)
-```
+<h1 align="center">Kitty</h1>
 
-<p>
+<p align="center">
+  A LangChain Slack workplace agent for <strong>Notion</strong>, <strong>Gmail</strong>, and
+  <strong>Google Calendar</strong> — with voice notes in and spoken replies out.
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Python-3.12-1d4ed8" alt="Python">
   <img src="https://img.shields.io/badge/Slack-Bolt-4A154B" alt="Slack">
   <img src="https://img.shields.io/badge/Notion-API-000000" alt="Notion">
+  <img src="https://img.shields.io/badge/Gmail%20%2B%20Calendar-4285F4" alt="Google">
+  <img src="https://img.shields.io/badge/LangChain-agent-1c3c3c" alt="LangChain">
   <img src="https://img.shields.io/badge/LLM-Ollama%20%7C%20Groq%20%7C%20OpenRouter-f55036" alt="LLM">
 </p>
 
 ---
 
-## What you can say
+## What it does
 
-Anything you would do in Notion, from Slack:
+Talk to Kitty in a Slack DM, mention, or thread (or use the CLI). Chat is the UI.
 
-| You say in Slack | Kitty does |
+| Surface | What Kitty can do |
+| --- | --- |
+| **Notion** | Create, read, append, replace, rename, search, and archive pages |
+| **Meeting notes** | Turn notes into action items, then save them to Notion |
+| **Gmail** | Search inbox, read a message, save a draft (**never sends**) |
+| **Calendar** | List upcoming events; create an event after you confirm |
+| **Voice** | Transcribe Slack voice notes (Whisper) and reply with speech (Edge TTS) |
+| **Web** | Optional Tavily search when you need outside context |
+| **Slack notify** | Ping a channel when you ask |
+
+Destructive Notion writes (archive / overwrite) wait for your confirm.
+
+### Example asks
+
+| You say | Kitty does |
 | --- | --- |
 | “Create a page called Hiring plan” | New Notion page under your parent page |
 | “Add interview-loop notes to Hiring plan” | Appends headings / bullets / paragraphs |
 | “What’s on the Hiring plan page?” | Reads the page and summarizes it |
-| “Search Notion for refund policy” | Finds matching pages |
-| “Archive the old draft page” | Soft-deletes (Notion archive) after you confirm |
-
-Meeting notes, specs, checklists, and wikis are all the same path — pages and blocks. Kitty is not a meeting-only bot.
-
-| Surface | Role |
-| --- | --- |
-| **Slack** | Mentions, DMs, and thread replies. This is the product UI. |
-| **CLI** | Same agent locally (`Kitty >`) when Slack is off. |
-| **Notion** | Source of truth for pages and content. |
-| **Web search** | Optional Tavily lookup when a page needs outside context. |
-
-Design rules:
-
-1. **Channel first** — Slack in, Notion out (CLI mocks the same UX).
-2. **Tools second** — create / get / append / search / archive. No silent writes.
-3. **Propose, then confirm** — especially archive and overwrite.
+| “Turn these meeting notes into action items…” | Extracts bullets, then creates/appends a page |
+| “Search my inbox for Acme” | Gmail search |
+| “Draft a follow-up to Sarah…” | Saves a Gmail **draft** only |
+| “What’s on my calendar this week?” | Lists events |
+| Send a **voice note** | Whisper → agent → text + spoken reply |
 
 ---
 
@@ -53,26 +60,27 @@ Design rules:
 ```text
 Slack / CLI
     →  src/main.py  or  src/intigration/slack.py
-            →  src/agent/agent.py
-                    →  Ollama / Groq / OpenRouter
-                            │
-                            ▼
-                    Notion tools + MCP
-                       /        |         \
-                 create      get/search    archive
-                 append      content
+            →  src/agent/agent.py   (LangChain create_agent)
+                    →  llm.py  (Ollama / Groq / OpenRouter)
+                    →  tools in mcp_tools/registry.py
+                           │
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+        Notion API     Gmail API      Calendar API
+        (+ voice in/out via audio.py + tts.py)
 ```
 
-1. You mention Kitty, DM it, or type in the CLI.
-2. The agent picks a Notion tool (create, append, get, search, archive).
-3. It calls the Notion API and replies in the same Slack thread.
-4. Archive / overwrite only after you say yes.
+1. You mention Kitty, DM it, type in the CLI, or send a voice note.
+2. The agent picks tools (Notion, Gmail, Calendar, …).
+3. It calls the real APIs and replies in the same Slack thread.
+4. Voice notes: Whisper transcript → agent → text update + optional mp3 reply.
+5. Archive / overwrite / calendar create only after you say yes.
 
 ---
 
-## Quick start (< 5 minutes)
+## Quick start (&lt; 5 minutes)
 
-Python 3.12+, Node.js (for MCP servers via `npx`), and an LLM (Ollama locally, or Groq / OpenRouter).
+Python 3.12+ and an LLM (Ollama locally, or Groq / OpenRouter).
 
 ### 1. Install
 
@@ -81,6 +89,7 @@ cd kitty
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+# or: uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 ### 2. Configure `.env`
@@ -95,71 +104,71 @@ LLM_MODEL_NAME=gpt-oss:120b-cloud
 
 # Notion — share a parent page with the integration
 NOTION_API_KEY=ntn_...
+# or NOTION_PAT_KEY=...
 NOTION_PAGE_ID=                  # default parent for new pages
-NOTION_DATABASE_ID=              # optional, if you create rows in a DB
+NOTION_DATABASE_ID=              # optional
 
 # Slack (Socket Mode)
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
-SLACK_TEAM_ID=
-SLACK_CHANNEL_IDS=
+
+# Google (Gmail + Calendar)
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
 
 # Optional
-TAVILY_API_KEY=tvly-...
+# TAVILY_API_KEY=tvly-...
 ```
 
-Switch providers by commenting the active block:
+Switch LLM providers by changing `LLM_PROVIDER` / `LLM_MODEL_NAME` / `LLM_API_KEY`.
 
-```env
-# LLM_PROVIDER=groq
-# LLM_API_KEY=gsk_...
-# LLM_MODEL_NAME=openai/gpt-oss-120b
+### 3. Sign in to Google
 
-# LLM_PROVIDER=openrouter
-# LLM_API_KEY=sk-or-v1-...
-# LLM_MODEL_NAME=minimax/minimax-m3:free
-```
+Ask Kitty in Slack for mail or calendar. If you are not signed in, it posts a
+**Sign in with Google** card — tap it on the computer running Kitty. That writes
+`token.json` in the project root (gitignored).
 
-### 3. Run the CLI
-
-With Slack tokens in `.env`, this starts the Socket Mode bot. **Leave it running** — Slack only replies while this process is up.
+You can still log in from the terminal:
 
 ```bash
+cd kitty
+PYTHONPATH=src .venv/bin/python -m intigration.gmail
+```
+
+### 4. Run
+
+```bash
+cd kitty
 python src/main.py
 ```
 
-You should see `Kitty is online` and `Bolt app is running!`. Then mention `@Kitty` in Slack or DM it.
+- With Slack tokens → Socket Mode bot (`Kitty is online`)
+- Without Slack tokens → terminal CLI (`Kitty >`)
 
-CLI only (no Slack):
+Leave the process running — Slack only replies while it is up.
+
+CLI only:
 
 ```bash
 python -c "import sys; sys.path.insert(0,'src'); from main import run_cli; run_cli()"
 ```
 
-```text
-Welcome to the Kitty CLI. Type 'quit' to exit.
-Kitty > Create a Notion page called Hiring plan with three bullets
-```
-
-Create a Slack app with Socket Mode, Bot Token (`xoxb-`), App Token (`xapp-`), and subscribe to `message.channels`, `message.groups`, `message.im`, and `app_mention`.
-
 ---
 
 ## Notion setup
 
-1. Create an [internal Notion integration](https://www.notion.so/my-integrations) and copy the token into `NOTION_API_KEY`.
-2. Share a **parent page** (or database) with that integration so Kitty can create children under it.
-3. Put that parent id in `NOTION_PAGE_ID` (the 32-character id in the page URL).
-
-Kitty talks to Notion as pages and blocks:
+1. Create an [internal Notion integration](https://www.notion.so/my-integrations) and put the token in `NOTION_API_KEY`.
+2. Share a **parent page** (or database) with that integration.
+3. Put that parent id in `NOTION_PAGE_ID` (32-character id from the page URL).
 
 | Tool | Notion API |
 | --- | --- |
-| `create_page` | `pages.create` under the parent page (or database) |
-| `append_content` | `blocks.children.append` |
-| `get_page` | `pages.retrieve` + `blocks.children.list` |
-| `search_pages` | `search` |
-| `delete_page` | `pages.update(archived=True)` — Notion has no hard delete |
+| `notion_create_page` | `pages.create` under the parent |
+| `notion_append_content` | `blocks.children.append` |
+| `notion_get_page` | `pages.retrieve` + blocks |
+| `notion_search_pages` | `search` |
+| `notion_delete_page` | `pages.update(archived=True)` |
+| `notion_generate_action_items` | LLM → markdown action list |
 
 Plain text / light markdown (`#`, `##`, `-`) becomes headings, bullets, and paragraphs.
 
@@ -167,18 +176,47 @@ Plain text / light markdown (`#`, `##`, `-`) becomes headings, bullets, and para
 
 ## Slack setup
 
-Socket Mode so you do not need a public webhook URL.
+Socket Mode — no public webhook URL required.
 
 | Scope / event | Why |
 | --- | --- |
 | `chat:write` | Replies |
-| `app_mentions:read`, `app_mention` | Mentions still work |
-| `channels:history`, `message.channels` | Every message in public channels Kitty has joined |
+| `app_mentions:read`, `app_mention` | Mentions |
+| `channels:history`, `message.channels` | Public channels Kitty has joined |
 | `groups:history`, `message.groups` | Private channels |
 | `im:history`, `im:write`, `message.im` | DMs |
+| `files:read`, `files:write` | Voice notes in + spoken replies out |
 | Socket Mode + `SLACK_APP_TOKEN` | Local receive without ngrok |
 
-In any channel Kitty has joined (and in DMs), it answers every human message. You do not need to `@Kitty`. Kick it from a channel if you do not want it listening there.
+In channels Kitty has joined (and in DMs), it can answer messages. Kick it from a channel if you do not want it listening there.
+
+---
+
+## Google setup (Gmail + Calendar)
+
+1. Create OAuth client credentials in Google Cloud (Desktop / installed app).
+2. Enable **Gmail API** and **Google Calendar API**.
+3. Put `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
+4. Run the login command above once → `token.json`.
+
+| Tool | Behavior |
+| --- | --- |
+| `search_emails` | Keyword search |
+| `get_email_details` | Full message by id |
+| `create_draft` | **Draft only — never sends** |
+| `list_calendar_events` | Upcoming events |
+| `create_calendar_event` | Creates event (ask user first) |
+
+---
+
+## Voice (Slack)
+
+1. User sends a voice note.
+2. Kitty downloads the file and runs **Whisper** → English text.
+3. The LangChain agent answers (with tools if needed).
+4. Kitty posts text **and** uploads an **Edge TTS** mp3 reply.
+
+No extra API keys for Whisper (local) or Edge TTS.
 
 ---
 
@@ -187,19 +225,25 @@ In any channel Kitty has joined (and in DMs), it answers every human message. Yo
 ```text
 kitty/
 ├── README.md
+├── kitty-thumbnail.png   # README / social banner
+├── kitty.jpg             # mascot (from cat.jpg)
+├── cat.jpg               # original photo
 ├── requirements.txt
-├── .env                 # local secrets, not committed
+├── .env                  # local secrets (not committed)
+├── token.json            # Google OAuth (not committed)
 └── src/
-    ├── main.py          # CLI entry
-    ├── llm.py           # chat model (Ollama / Groq / OpenRouter)
+    ├── main.py           # CLI or Slack entry
+    ├── llm.py            # chat model
+    ├── audio.py          # Slack voice → text (Whisper)
+    ├── tts.py            # text → mp3 (Edge TTS)
     ├── agent/
-    │   └── agent.py     # LangGraph agent + memory
+    │   └── agent.py      # LangChain agent + prompt
     ├── intigration/
-    │   ├── notion.py    # create / get / append / search / archive
-    │   └── slack.py     # Bolt Socket Mode bot
+    │   ├── notion.py     # Notion pages / blocks
+    │   ├── gmail.py      # Gmail + Calendar API
+    │   └── slack.py      # Bolt Socket Mode + voice
     └── mcp_tools/
-        ├── registry.py  # Slack, Notion, Tavily MCP
-        └── web_search.py
+        └── registry.py   # all @tool functions
 ```
 
 ---
@@ -208,13 +252,16 @@ kitty/
 
 Use this for a short recording or live walkthrough.
 
-1. **Create** — Slack: `@Kitty create a page called Hiring plan` with a short outline.
-2. **Get** — `@Kitty what’s on Hiring plan?` Kitty reads it back.
-3. **Append** — `@Kitty add a section about the interview loop`.
-4. **Search** — `@Kitty find pages about hiring`.
-5. **Archive** — `@Kitty archive Hiring plan`. Kitty asks to confirm, then archives.
+1. **Notion create** — `@Kitty create a page called Hiring plan` with a short outline.
+2. **Notion get** — `@Kitty what’s on Hiring plan?`
+3. **Action items** — paste meeting notes → action list page.
+4. **Gmail** — `@Kitty search my inbox for partnership`.
+5. **Draft** — `@Kitty draft a short reply to that email` (confirm it is a draft).
+6. **Calendar** — `@Kitty what’s on my calendar this week?`
+7. **Voice** — send a voice note: “Create a Notion page called Voice test.”
+8. **Archive** — `@Kitty archive Voice test` → confirm → archive.
 
-Same flow works in the CLI. Meeting notes are just one kind of page — not a special mode.
+Same flows work in the CLI (except Slack voice upload).
 
 ---
 
@@ -222,18 +269,31 @@ Same flow works in the CLI. Meeting notes are just one kind of page — not a sp
 
 | Package | Role |
 | --- | --- |
-| `langchain`, `langgraph`, `langchain-ollama` | Agent loop and tools |
-| `langchain[mcp]` | MCP tool adapters |
+| `langchain`, `langgraph` | Agent loop and tools |
 | `notion-client` | Notion API |
+| `google-api-python-client`, `google-auth-*` | Gmail + Calendar |
 | `slack-bolt` | Slack Socket Mode |
-| `fastapi`, `uvicorn` | HTTP surface (optional) |
+| `faster-whisper`, `edge-tts` | Voice in / out |
 | `python-dotenv` | Local config |
-| `faster-whisper`, `edge-tts` | Voice notes in Slack |
+| `requests` | Download Slack audio files |
 
-Node is only required for MCP servers started with `npx` (`@modelcontextprotocol/server-slack`, Notion remote MCP, Tavily).
+---
+
+## Safety
+
+- Drafts use `create_draft` only. Kitty does **not** send mail.
+- Calendar creates should be confirmed by the user.
+- Notion archive / replace wait for confirm.
+- Keep `.env` and `token.json` out of git.
 
 ---
 
 ## Status
 
-General Slack ↔ Notion agent (P02 workplace track). Notion surface: create page, append content, get, search, archive. Slack bot + CLI as the chat UI. Writes that destroy data stay behind a confirm.
+P02 workplace track — Slack ↔ Notion (meeting notes → action items), plus Gmail, Calendar, and voice-to-voice so Kitty is a full workplace teammate.
+
+---
+
+<p align="center">
+  <em>Built for Slack. Named for a cat. Powered by LangChain.</em>
+</p>

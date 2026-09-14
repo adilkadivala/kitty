@@ -1,14 +1,13 @@
-"""LangChain tools for Notion (and optional extras)."""
+"""LangChain tools for Kitty: Notion + Gmail + Calendar (+ optional web)."""
 
 import json
 import os
 
-from slack_sdk import WebClient
-
 from langchain.messages import HumanMessage, SystemMessage
 from langchain.tools import tool
+from slack_sdk import WebClient
 
-from llm import model
+from intigration import gmail as google_mail
 from intigration.notion import (
     append_content,
     create_page,
@@ -18,6 +17,7 @@ from intigration.notion import (
     resolve_page,
     search_pages,
 )
+from llm import model
 
 
 def _ok(fn, *args, **kwargs) -> str:
@@ -143,15 +143,59 @@ def slack_notify_message(channel: str, text: str) -> str:
         return f"Tool error: {e}"
 
 
+# ---------- Gmail ----------
+
+@tool
+def search_emails(query: str) -> str:
+    """Search the Gmail inbox by keyword and return matching emails."""
+    return _ok(google_mail.search_emails, query)
+
+
+@tool
+def get_email_details(email_id: str) -> str:
+    """Read one Gmail message by id, including the full body."""
+    return _ok(google_mail.get_email_details, email_id)
+
+
+@tool
+def create_draft(to: str, subject: str, body: str) -> str:
+    """Save a Gmail draft. Does not send the email."""
+    return _ok(google_mail.create_draft, to, subject, body)
+
+
+# ---------- Calendar ----------
+
+@tool
+def list_calendar_events(days_ahead: int = 7) -> str:
+    """List upcoming Google Calendar events for the next N days."""
+    return _ok(google_mail.list_calendar_events, days_ahead)
+
+
+@tool
+def create_calendar_event(
+    title: str,
+    start: str,
+    end: str,
+    with_person: str = "",
+) -> str:
+    """Create a Google Calendar event. start/end must be ISO datetimes. Confirm with user first."""
+    return _ok(google_mail.create_calendar_event, title, start, end, with_person)
+
+
+# ---------- Optional web ----------
+
 @tool
 def web_search(query: str) -> str:
-    """Search the web for current information."""
+    """Search the web for current information (needs TAVILY_API_KEY)."""
     from tavily import TavilyClient
 
     key = os.getenv("TAVILY_API_KEY")
     if not key:
         return "TAVILY_API_KEY is not set."
-    return json.dumps(TavilyClient(api_key=key).search(query))
+    try:
+        return json.dumps(TavilyClient(api_key=key).search(query))
+    except Exception as e:
+        return f"Tool error: {e}"
 
 
 NOTION_TOOLS = [
@@ -166,8 +210,16 @@ NOTION_TOOLS = [
     slack_notify_message,
 ]
 
+GOOGLE_TOOLS = [
+    search_emails,
+    get_email_details,
+    create_draft,
+    list_calendar_events,
+    create_calendar_event,
+]
+
 
 def get_tools() -> list:
-    tools = list(NOTION_TOOLS) + [web_search]
+    tools = list(NOTION_TOOLS) + list(GOOGLE_TOOLS) + [web_search]
     print(f"[Tools] ready: {[t.name for t in tools]}")
     return tools

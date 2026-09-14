@@ -31,8 +31,8 @@ def ask_assistant(prompt:str) -> str:
     messages = [
         SystemMessage(
             content=(
-                "You are Kitty, a Slack agent for Notion. "
-                "You create, read, edit, search, and archive pages."
+                "You are Kitty, a Slack workplace agent for Notion, "
+                "Gmail, and Google Calendar."
             )
         ), 
         HumanMessage(content=prompt)
