@@ -74,15 +74,16 @@ def google_login_blocks(auth_url: str) -> list:
 
 def get_question(event, client):
     """
-    Read user input from Slack.
+    Read the user question from a Slack event.
     Returns (text, is_voice).
     """
+    # Voice note → Whisper transcript
     for f in event.get("files") or []:
         if (f.get("mimetype") or "").startswith("audio/"):
-            info = client.files_info(file=f["id"])
-            url = info["file"]["url_private_download"]
+            url = client.files_info(file=f["id"])["file"]["url_private_download"]
             return slack_audio_to_text(url), True
 
+    # Normal text (strip @mentions like <@U123>)
     words = [w for w in (event.get("text") or "").split() if not w.startswith("<@")]
     return " ".join(words).strip(), False
 
@@ -122,23 +123,20 @@ def markdown_to_mrkdwn(text: str) -> str:
     return text[:3900]
 
 
-def send_voice_reply(client, channel_id, thread_ts, thinking_ts, text: str):
-    """Upload a spoken reply, then remove the Thinking message."""
-    spoken = markdown_to_mrkdwn(text) or "I don't have anything to say."
-    mp3_path = text_to_speech(spoken)
+def send_voice_reply(client, channel_id, thread_ts, thinking_ts, text):
+    """Upload a spoken reply, then remove the 'Thinking...' message."""
+    formatted = markdown_to_mrkdwn(text) or "I don't have anything to say."
+    mp3_path = text_to_speech(formatted)
     if not mp3_path:
         return
     try:
         client.files_upload_v2(
             channel=channel_id,
             file=mp3_path,
-            initial_comment=spoken[:3900],
+            initial_comment=formatted[:3900],
             thread_ts=thread_ts,
         )
-        try:
-            client.chat_delete(channel=channel_id, ts=thinking_ts)
-        except Exception:
-            pass
+        client.chat_delete(channel=channel_id, ts=thinking_ts)
     finally:
         if os.path.exists(mp3_path):
             os.remove(mp3_path)
@@ -239,7 +237,7 @@ def slack():
             print(f"[Slack] Final update failed: {e}")
             say(text=reply, thread_ts=thread_ts)
 
-        # Voice-in → also speak the answer back
+        # Optional spoken reply for voice notes
         if is_voice:
             send_voice_reply(
                 client,
@@ -255,7 +253,8 @@ def slack():
 
     @app.event("message")
     def on_message(event, say, client):
-        if event.get("bot_id") or event.get("subtype"):
+        # Ignore other bots
+        if event.get("bot_id"):
             return
         if event.get("channel_type") in ("im", "mpim", "channel", "group"):
             handle_event(event, say, client)

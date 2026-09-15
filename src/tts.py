@@ -1,7 +1,5 @@
 """Turn text into a spoken .mp3 file (Microsoft Edge voices, no API key)."""
 
-from __future__ import annotations
-
 import asyncio
 import tempfile
 
@@ -11,10 +9,6 @@ VOICE = "en-US-JennyNeural"
 
 
 def text_to_speech(text: str) -> str:
-    """
-    Save spoken audio to a temp .mp3 and return the path.
-    Returns "" on failure.
-    """
     if not text:
         return ""
 
